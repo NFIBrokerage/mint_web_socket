@@ -145,7 +145,7 @@ defmodule Mint.WebSocket do
   @typedoc """
   A WebSocket frame
 
-  * `{:binary, binary}` - a frame containing binary data. Binary frames
+  * `{:binary, iodata}` - a frame containing binary data. Binary frames
     can be used to send arbitrary binary data such as a PDF.
   * `{:text, text}` - a frame containing string data. Text frames must be
     valid utf8. Elixir has wonderful support for utf8: `String.valid?/1`
@@ -184,7 +184,7 @@ defmodule Mint.WebSocket do
   """
   @type frame ::
           {:text, String.t()}
-          | {:binary, binary()}
+          | {:binary, iodata()}
           | {:ping, binary()}
           | {:pong, binary()}
           | {:close, code :: non_neg_integer() | nil, reason :: binary() | nil}
@@ -505,7 +505,7 @@ defmodule Mint.WebSocket do
   end
 
   @doc """
-  Encodes a frame into a binary
+  Encodes a frame into iodata
 
   The resulting binary may be sent with `stream_request_body/3`.
 
@@ -519,7 +519,7 @@ defmodule Mint.WebSocket do
   {:ok, conn} = Mint.WebSocket.stream_request_body(conn, websocket_ref, data)
   ```
   """
-  @spec encode(t(), shorthand_frame() | frame()) :: {:ok, t(), binary()} | {:error, t(), any()}
+  @spec encode(t(), shorthand_frame() | frame()) :: {:ok, t(), iodata()} | {:error, t(), any()}
   defdelegate encode(websocket, frame), to: Frame
 
   @doc """

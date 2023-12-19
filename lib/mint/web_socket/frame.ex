@@ -60,11 +60,16 @@ defmodule Mint.WebSocket.Frame do
 
   defguard is_fin(frame) when elem(frame, 4) == true
 
+  # we can't valiate iodata with a guard but we can sanity check that
+  # it's either a binary or a list
+  defguardp is_iodata(data) when is_binary(data) or is_list(data)
+
   # guards frames dealt with in the user-space (not records)
   defguardp is_friendly_frame(frame)
             when frame in [:ping, :pong, :close] or
-                   (is_tuple(frame) and elem(frame, 0) in [:text, :binary, :ping, :pong] and
+                   (is_tuple(frame) and elem(frame, 0) in [:text, :ping, :pong] and
                       is_binary(elem(frame, 1))) or
+                   (is_tuple(frame) and elem(frame, 0) == :binary and is_iodata(elem(frame, 1))) or
                    (is_tuple(frame) and elem(frame, 0) == :close and is_integer(elem(frame, 1)) and
                       is_binary(elem(frame, 2)))
 
@@ -94,7 +99,7 @@ defmodule Mint.WebSocket.Frame do
   def new_mask, do: :crypto.strong_rand_bytes(4)
 
   @spec encode(Mint.WebSocket.t(), Mint.WebSocket.shorthand_frame() | Mint.WebSocket.frame()) ::
-          {:ok, Mint.WebSocket.t(), bitstring()}
+          {:ok, Mint.WebSocket.t(), iodata()}
           | {:error, Mint.WebSocket.t(), WebSocketError.t()}
   def encode(websocket, frame) when is_friendly_frame(frame) do
     {frame, extensions} =
@@ -103,29 +108,35 @@ defmodule Mint.WebSocket.Frame do
       |> Extension.encode(websocket.extensions)
 
     websocket = put_in(websocket.extensions, extensions)
-    frame = encode_to_binary(frame)
+    frame = encode_to_iodata(frame)
 
     {:ok, websocket, frame}
   catch
     :throw, {:mint, reason} -> {:error, websocket, reason}
   end
 
-  @spec encode_to_binary(frame_record()) :: bitstring()
-  defp encode_to_binary(frame) do
+  @spec encode_to_iodata(frame_record()) :: iodata()
+  defp encode_to_iodata(frame) do
     payload = payload(frame)
     mask = mask(frame)
     masked? = if mask == nil, do: 0, else: 1
     encoded_payload_length = encode_payload_length(elem(frame, 0), byte_size(payload))
 
-    <<
-      encode_fin(frame)::bitstring,
-      reserved(frame)::bitstring,
-      encode_opcode(frame)::bitstring,
-      masked?::size(1),
-      encoded_payload_length::bitstring,
-      mask || <<>>::binary,
-      apply_mask(payload, mask)::bitstring
-    >>
+    [
+      # Note this is always a binary despite the small sized bitstrings
+      # used to construct the frame. The payload length is either 7, 23 or 71
+      # bits so this binary always has bits divisible by 8.
+      # (This is important because bitstrings are not valid iodata.)
+      <<
+        encode_fin(frame)::bitstring,
+        reserved(frame)::bitstring,
+        encode_opcode(frame)::bitstring,
+        masked?::size(1),
+        encoded_payload_length::bitstring
+      >>,
+      mask || <<>>,
+      apply_mask(payload, mask)
+    ]
   end
 
   defp payload(close(code: nil, reason: nil)) do
@@ -176,28 +187,45 @@ defmodule Mint.WebSocket.Frame do
   # bytes (where the mask bytes repeat).
   # This is an "involution" function: applying the mask will mask
   # the data and applying the mask again will unmask it.
-  def apply_mask(payload, mask, acc \\ <<>>)
+  @spec apply_mask(iodata(), binary() | nil) :: iodata()
+  def apply_mask(payload, nil), do: payload
 
-  def apply_mask(payload, nil, _acc), do: payload
+  def apply_mask(payload, mask) when is_binary(payload) do
+    apply_mask_binary(payload, mask, [])
+  end
+
+  def apply_mask(payload, mask) when is_list(payload) do
+    apply_mask_iodata(payload, mask, [])
+  end
+
+  @spec apply_mask_binary(binary(), binary(), iodata()) :: iodata()
+  def apply_mask_binary(payload, mask)
 
   # n=4 is the happy path
   # n=3..1 catches cases where the remaining byte_size/1 of the payload is shorter
   # than the mask
   for n <- 4..1 do
-    def apply_mask(
+    def apply_mask_binary(
           <<part_key::integer-size(8)-unit(unquote(n)), payload_rest::binary>>,
           <<mask_key::integer-size(8)-unit(unquote(n)), _::binary>> = mask,
           acc
         ) do
-      apply_mask(
+      apply_mask_binary(
         payload_rest,
         mask,
-        <<acc::binary, :erlang.bxor(mask_key, part_key)::integer-size(8)-unit(unquote(n))>>
+        [<<:erlang.bxor(mask_key, part_key)::integer-size(8)-unit(unquote(n))>> | acc]
       )
     end
   end
 
-  def apply_mask(<<>>, _mask, acc), do: acc
+  def apply_mask_binary(<<>>, _mask, acc), do: :lists.reverse(acc)
+
+  @spec apply_mask_iodata(iodata(), binary(), iodata()) :: iodata()
+  def apply_mask_iodata(_iodata, _mask, _acc) do
+    # TODO: encode the payload by applying the mask like with binaries
+    # above, but don't switch the payload to a binary to do it.
+    :todo
+  end
 
   @spec decode(Mint.WebSocket.t(), binary()) ::
           {:ok, Mint.WebSocket.t(), [Mint.WebSocket.frame() | {:error, term()}]}
